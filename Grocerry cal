@@ -1,0 +1,743 @@
+import { useState, useEffect, useCallback } from "react";
+
+const CURRENCIES = [
+  { code: "USD", symbol: "$", name: "US Dollar" },
+  { code: "EUR", symbol: "€", name: "Euro" },
+  { code: "GBP", symbol: "£", name: "British Pound" },
+  { code: "THB", symbol: "฿", name: "Thai Baht" },
+  { code: "JPY", symbol: "¥", name: "Japanese Yen" },
+  { code: "AUD", symbol: "A$", name: "Australian Dollar" },
+  { code: "SGD", symbol: "S$", name: "Singapore Dollar" },
+  { code: "CAD", symbol: "C$", name: "Canadian Dollar" },
+];
+
+const UNITS = ["item", "ml", "L", "g", "kg", "oz", "lb", "pack"];
+
+const PROMO_PRESETS = [
+  { label: "Buy 1 Get 1 Free", qtyPaid: 1, qtyReceived: 2, discountPct: 0 },
+  { label: "Buy 2 Get 1 Free", qtyPaid: 2, qtyReceived: 3, discountPct: 0 },
+  { label: "Buy 2 Get 2 Free", qtyPaid: 2, qtyReceived: 4, discountPct: 0 },
+  { label: "Buy 3 Get 1 Free", qtyPaid: 3, qtyReceived: 4, discountPct: 0 },
+  { label: "10% Off", qtyPaid: 1, qtyReceived: 1, discountPct: 10 },
+  { label: "20% Off", qtyPaid: 1, qtyReceived: 1, discountPct: 20 },
+  { label: "30% Off", qtyPaid: 1, qtyReceived: 1, discountPct: 30 },
+  { label: "50% Off", qtyPaid: 1, qtyReceived: 1, discountPct: 50 },
+  { label: "No Promo", qtyPaid: 1, qtyReceived: 1, discountPct: 0 },
+];
+
+const DEAL_COLORS = [
+  { bg: "from-violet-500 to-purple-600", light: "#8b5cf6", tag: "purple" },
+  { bg: "from-cyan-500 to-blue-600", light: "#06b6d4", tag: "cyan" },
+  { bg: "from-rose-500 to-pink-600", light: "#f43f5e", tag: "rose" },
+  { bg: "from-amber-500 to-orange-600", light: "#f59e0b", tag: "amber" },
+  { bg: "from-emerald-500 to-teal-600", light: "#10b981", tag: "emerald" },
+];
+
+const DEMO_DEALS = [
+  {
+    id: 1,
+    name: "Store Brand Milk",
+    originalPrice: 89,
+    qtyPaid: 1,
+    qtyReceived: 2,
+    discountPct: 0,
+    fixedDiscount: 0,
+    size: 1000,
+    unit: "ml",
+  },
+  {
+    id: 2,
+    name: "Premium Milk",
+    originalPrice: 120,
+    qtyPaid: 1,
+    qtyReceived: 1,
+    discountPct: 30,
+    fixedDiscount: 0,
+    size: 1000,
+    unit: "ml",
+  },
+  {
+    id: 3,
+    name: "Organic Milk",
+    originalPrice: 150,
+    qtyPaid: 2,
+    qtyReceived: 3,
+    discountPct: 0,
+    fixedDiscount: 0,
+    size: 1000,
+    unit: "ml",
+  },
+];
+
+function calcDeal(deal) {
+  const { originalPrice, qtyPaid, qtyReceived, discountPct, fixedDiscount, size } = deal;
+  if (!originalPrice || originalPrice <= 0 || !qtyPaid || !qtyReceived) return null;
+
+  const priceAfterFixed = Math.max(0, originalPrice - (fixedDiscount || 0));
+  const priceAfterPct = priceAfterFixed * (1 - (discountPct || 0) / 100);
+  const totalPaid = priceAfterPct * qtyPaid;
+  const totalReceived = qtyReceived;
+  const effectivePricePerUnit = totalPaid / totalReceived;
+  const originalTotalValue = originalPrice * qtyReceived;
+  const savings = originalTotalValue - totalPaid;
+  const effectiveDiscountPct = (savings / originalTotalValue) * 100;
+  const pricePerSize = size && size > 0 ? effectivePricePerUnit / size : null;
+
+  return {
+    totalPaid,
+    totalReceived,
+    effectivePricePerUnit,
+    effectiveDiscountPct,
+    savings,
+    pricePerSize,
+  };
+}
+
+function getBadges(deals, results) {
+  const valid = results.map((r, i) => ({ r, i })).filter(({ r }) => r !== null);
+  if (valid.length < 2) return results.map(() => []);
+
+  const badges = results.map(() => []);
+
+  // Best value (lowest effective price per unit)
+  const bestUnit = valid.reduce((a, b) => (a.r.effectivePricePerUnit < b.r.effectivePricePerUnit ? a : b));
+  badges[bestUnit.i].push({ label: "Best Value", color: "bg-emerald-500" });
+
+  // Highest savings
+  const highestSavings = valid.reduce((a, b) => (a.r.savings > b.r.savings ? a : b));
+  if (highestSavings.i !== bestUnit.i) {
+    badges[highestSavings.i].push({ label: "Highest Savings", color: "bg-blue-500" });
+  }
+
+  // Lowest unit price (pricePerSize)
+  const hasSizeComparison = valid.every(({ r }) => r.pricePerSize !== null);
+  if (hasSizeComparison) {
+    const lowestPerSize = valid.reduce((a, b) => (a.r.pricePerSize < b.r.pricePerSize ? a : b));
+    if (!badges[lowestPerSize.i].some(b => b.label === "Best Value")) {
+      badges[lowestPerSize.i].push({ label: "Lowest Unit Price", color: "bg-violet-500" });
+    }
+  }
+
+  // Winner badge (overall best)
+  badges[bestUnit.i].push({ label: "🏆 Winner", color: "bg-yellow-500 text-yellow-900" });
+
+  return badges;
+}
+
+function SmartRecommendation({ deals, results, currency }) {
+  const valid = results.map((r, i) => ({ r, i, deal: deals[i] })).filter(({ r }) => r !== null);
+  if (valid.length < 2) return null;
+
+  const best = valid.reduce((a, b) => (a.r.effectivePricePerUnit < b.r.effectivePricePerUnit ? a : b));
+  const worst = valid.reduce((a, b) => (a.r.effectivePricePerUnit > b.r.effectivePricePerUnit ? a : b));
+
+  if (best.i === worst.i) return null;
+
+  const pctBetter = ((worst.r.effectivePricePerUnit - best.r.effectivePricePerUnit) / worst.r.effectivePricePerUnit * 100).toFixed(1);
+  const savingsDiff = (worst.r.effectivePricePerUnit - best.r.effectivePricePerUnit).toFixed(2);
+  const bestName = best.deal.name || `Deal ${best.i + 1}`;
+  const worstName = worst.deal.name || `Deal ${worst.i + 1}`;
+
+  return (
+    <div className="recommendation-card">
+      <div className="rec-icon">🧠</div>
+      <div className="rec-content">
+        <div className="rec-title">Smart Recommendation</div>
+        <div className="rec-text">
+          <strong>{bestName}</strong> is the best choice — you pay{" "}
+          <span className="rec-highlight">{pctBetter}% less per unit</span> compared to{" "}
+          <strong>{worstName}</strong>, saving{" "}
+          <span className="rec-highlight">{currency.symbol}{savingsDiff}</span> per unit received.
+        </div>
+        {valid.length > 2 && (
+          <div className="rec-sub">
+            Compared {valid.length} deals · Ranked by effective price per unit
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ComparisonBar({ deals, results, currency }) {
+  const valid = results.map((r, i) => ({ r, i })).filter(({ r }) => r !== null);
+  if (valid.length < 2) return null;
+
+  const maxPrice = Math.max(...valid.map(({ r }) => r.effectivePricePerUnit));
+  const minPrice = Math.min(...valid.map(({ r }) => r.effectivePricePerUnit));
+
+  return (
+    <div className="comparison-section">
+      <div className="section-title">Price Comparison</div>
+      {deals.map((deal, i) => {
+        const r = results[i];
+        if (!r) return null;
+        const pct = maxPrice > 0 ? (r.effectivePricePerUnit / maxPrice) * 100 : 100;
+        const isMin = r.effectivePricePerUnit === minPrice;
+        const color = DEAL_COLORS[i % DEAL_COLORS.length];
+        return (
+          <div key={deal.id} className="bar-row">
+            <div className="bar-label">{deal.name || `Deal ${i + 1}`}</div>
+            <div className="bar-track">
+              <div
+                className={`bar-fill bg-gradient-to-r ${color.bg}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className={`bar-price ${isMin ? "bar-price-best" : ""}`}>
+              {currency.symbol}{r.effectivePricePerUnit.toFixed(2)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DealCard({ deal, index, result, badges, currency, onUpdate, onRemove, canRemove }) {
+  const color = DEAL_COLORS[index % DEAL_COLORS.length];
+  const isWinner = badges.some(b => b.label === "🏆 Winner");
+
+  const applyPreset = (preset) => {
+    onUpdate({ qtyPaid: preset.qtyPaid, qtyReceived: preset.qtyReceived, discountPct: preset.discountPct });
+  };
+
+  return (
+    <div className={`deal-card ${isWinner ? "deal-card-winner" : ""}`} style={{ "--card-accent": color.light }}>
+      {isWinner && <div className="winner-glow" />}
+      <div className="card-header">
+        <div className={`card-index bg-gradient-to-br ${color.bg}`}>{index + 1}</div>
+        <input
+          className="name-input"
+          placeholder="Product name..."
+          value={deal.name}
+          onChange={e => onUpdate({ name: e.target.value })}
+        />
+        {canRemove && (
+          <button className="remove-btn" onClick={onRemove}>✕</button>
+        )}
+      </div>
+
+      {badges.length > 0 && (
+        <div className="badge-row">
+          {badges.map((b, bi) => (
+            <span key={bi} className={`badge ${b.color}`}>{b.label}</span>
+          ))}
+        </div>
+      )}
+
+      <div className="preset-row">
+        <select
+          className="preset-select"
+          onChange={e => {
+            const p = PROMO_PRESETS[parseInt(e.target.value)];
+            if (p) applyPreset(p);
+          }}
+          defaultValue=""
+        >
+          <option value="" disabled>Quick promo preset…</option>
+          {PROMO_PRESETS.map((p, i) => (
+            <option key={i} value={i}>{p.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="input-grid">
+        <div className="input-group span-2">
+          <label>Original Price ({currency.symbol})</label>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={deal.originalPrice || ""}
+            onChange={e => onUpdate({ originalPrice: parseFloat(e.target.value) || 0 })}
+            placeholder="0.00"
+          />
+        </div>
+        <div className="input-group">
+          <label>Qty Paid</label>
+          <input
+            type="number"
+            min="1"
+            value={deal.qtyPaid || ""}
+            onChange={e => onUpdate({ qtyPaid: parseInt(e.target.value) || 1 })}
+          />
+        </div>
+        <div className="input-group">
+          <label>Qty Received</label>
+          <input
+            type="number"
+            min="1"
+            value={deal.qtyReceived || ""}
+            onChange={e => onUpdate({ qtyReceived: parseInt(e.target.value) || 1 })}
+          />
+        </div>
+        <div className="input-group">
+          <label>Discount %</label>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={deal.discountPct || ""}
+            onChange={e => onUpdate({ discountPct: parseFloat(e.target.value) || 0 })}
+            placeholder="0"
+          />
+        </div>
+        <div className="input-group">
+          <label>Fixed Off ({currency.symbol})</label>
+          <input
+            type="number"
+            min="0"
+            value={deal.fixedDiscount || ""}
+            onChange={e => onUpdate({ fixedDiscount: parseFloat(e.target.value) || 0 })}
+            placeholder="0"
+          />
+        </div>
+        <div className="input-group">
+          <label>Size</label>
+          <input
+            type="number"
+            min="0"
+            value={deal.size || ""}
+            onChange={e => onUpdate({ size: parseFloat(e.target.value) || 0 })}
+            placeholder="e.g. 500"
+          />
+        </div>
+        <div className="input-group">
+          <label>Unit</label>
+          <select value={deal.unit} onChange={e => onUpdate({ unit: e.target.value })}>
+            {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {result ? (
+        <div className="results-grid">
+          <div className="result-item">
+            <div className="result-label">Total Paid</div>
+            <div className="result-value">{currency.symbol}{result.totalPaid.toFixed(2)}</div>
+          </div>
+          <div className="result-item">
+            <div className="result-label">Items Received</div>
+            <div className="result-value">{result.totalReceived}</div>
+          </div>
+          <div className="result-item">
+            <div className="result-label">Price / Item</div>
+            <div className="result-value result-main">{currency.symbol}{result.effectivePricePerUnit.toFixed(2)}</div>
+          </div>
+          <div className="result-item">
+            <div className="result-label">Eff. Discount</div>
+            <div className={`result-value ${result.effectiveDiscountPct > 0 ? "result-good" : ""}`}>
+              {result.effectiveDiscountPct.toFixed(1)}%
+            </div>
+          </div>
+          <div className="result-item span-2">
+            <div className="result-label">You Save</div>
+            <div className={`result-value result-savings ${result.savings > 0 ? "result-good" : "result-neutral"}`}>
+              {result.savings > 0 ? `${currency.symbol}${result.savings.toFixed(2)}` : "No savings"}
+            </div>
+          </div>
+          {result.pricePerSize && deal.size > 0 && (
+            <div className="result-item span-2">
+              <div className="result-label">Price per {deal.unit}</div>
+              <div className="result-value result-main">
+                {currency.symbol}{result.pricePerSize.toFixed(4)} / {deal.unit}
+              </div>
+            </div>
+          )}
+          <div className="math-note span-2">
+            💡 Math: {currency.symbol}{deal.originalPrice} × {deal.qtyPaid}
+            {deal.discountPct > 0 ? ` × ${100 - deal.discountPct}%` : ""}
+            {deal.fixedDiscount > 0 ? ` − ${currency.symbol}${deal.fixedDiscount}` : ""}
+            {" "}= {currency.symbol}{result.totalPaid.toFixed(2)} for {result.totalReceived} item{result.totalReceived !== 1 ? "s" : ""}
+          </div>
+        </div>
+      ) : (
+        <div className="no-result">Enter price & quantities to see analysis</div>
+      )}
+    </div>
+  );
+}
+
+let nextId = 4;
+
+export default function App() {
+  const [dark, setDark] = useState(true);
+  const [currency, setCurrency] = useState(CURRENCIES[3]);
+  const [deals, setDeals] = useState(DEMO_DEALS);
+
+  const results = deals.map(calcDeal);
+  const allBadges = getBadges(deals, results);
+
+  const updateDeal = useCallback((id, fields) => {
+    setDeals(prev => prev.map(d => d.id === id ? { ...d, ...fields } : d));
+  }, []);
+
+  const removeDeal = useCallback((id) => {
+    setDeals(prev => prev.filter(d => d.id !== id));
+  }, []);
+
+  const addDeal = () => {
+    setDeals(prev => [...prev, {
+      id: nextId++,
+      name: "",
+      originalPrice: 0,
+      qtyPaid: 1,
+      qtyReceived: 1,
+      discountPct: 0,
+      fixedDiscount: 0,
+      size: 0,
+      unit: "item",
+    }]);
+  };
+
+  return (
+    <div className={dark ? "app dark" : "app light"}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        .app {
+          font-family: 'DM Sans', sans-serif;
+          min-height: 100vh;
+          transition: background 0.3s, color 0.3s;
+        }
+        .app.dark {
+          --bg: #0a0a0f;
+          --surface: #13131d;
+          --card: #1a1a2e;
+          --border: rgba(255,255,255,0.08);
+          --text: #e8e8f0;
+          --sub: #8888aa;
+          --input-bg: #0f0f1a;
+          --input-border: rgba(255,255,255,0.12);
+          background: var(--bg);
+          color: var(--text);
+        }
+        .app.light {
+          --bg: #f0f0f8;
+          --surface: #ffffff;
+          --card: #ffffff;
+          --border: rgba(0,0,0,0.08);
+          --text: #1a1a2e;
+          --sub: #6666aa;
+          --input-bg: #f5f5ff;
+          --input-border: rgba(0,0,0,0.12);
+          background: var(--bg);
+          color: var(--text);
+        }
+
+        .header {
+          padding: 20px 16px 0;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .header-left { flex: 1; min-width: 0; }
+        .app-title {
+          font-family: 'Syne', sans-serif;
+          font-size: clamp(20px, 5vw, 28px);
+          font-weight: 800;
+          background: linear-gradient(135deg, #a78bfa, #60a5fa, #34d399);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          white-space: nowrap;
+        }
+        .app-sub {
+          font-size: 12px;
+          color: var(--sub);
+          margin-top: 2px;
+        }
+        .header-controls {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-shrink: 0;
+        }
+        .currency-select {
+          background: var(--surface);
+          border: 1px solid var(--border);
+          color: var(--text);
+          padding: 6px 10px;
+          border-radius: 10px;
+          font-size: 13px;
+          font-family: inherit;
+          cursor: pointer;
+          outline: none;
+        }
+        .dark-toggle {
+          background: var(--surface);
+          border: 1px solid var(--border);
+          color: var(--text);
+          width: 38px;
+          height: 38px;
+          border-radius: 10px;
+          cursor: pointer;
+          font-size: 16px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background 0.2s;
+        }
+        .dark-toggle:hover { background: var(--card); }
+
+        .main { padding: 16px; display: flex; flex-direction: column; gap: 16px; max-width: 480px; margin: 0 auto; }
+
+        /* Recommendation */
+        .recommendation-card {
+          background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(96,165,250,0.15));
+          border: 1px solid rgba(139,92,246,0.3);
+          border-radius: 16px;
+          padding: 16px;
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+          animation: fadeIn 0.4s ease;
+        }
+        .rec-icon { font-size: 24px; flex-shrink: 0; }
+        .rec-title {
+          font-family: 'Syne', sans-serif;
+          font-size: 13px;
+          font-weight: 700;
+          color: #a78bfa;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          margin-bottom: 6px;
+        }
+        .rec-text { font-size: 14px; line-height: 1.5; color: var(--text); }
+        .rec-highlight { color: #34d399; font-weight: 600; }
+        .rec-sub { font-size: 11px; color: var(--sub); margin-top: 6px; }
+
+        /* Comparison bars */
+        .comparison-section {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          padding: 16px;
+        }
+        .section-title {
+          font-family: 'Syne', sans-serif;
+          font-size: 13px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--sub);
+          margin-bottom: 14px;
+        }
+        .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .bar-label { font-size: 12px; color: var(--text); width: 90px; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .bar-track { flex: 1; height: 10px; background: var(--input-bg); border-radius: 99px; overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 99px; transition: width 0.5s cubic-bezier(.4,0,.2,1); }
+        .bar-price { font-size: 12px; font-weight: 600; color: var(--sub); width: 52px; text-align: right; flex-shrink: 0; }
+        .bar-price-best { color: #34d399; }
+
+        /* Deal cards */
+        .deal-card {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 20px;
+          padding: 16px;
+          position: relative;
+          overflow: hidden;
+          transition: border-color 0.3s, box-shadow 0.3s;
+          animation: slideUp 0.35s ease;
+        }
+        .deal-card-winner {
+          border-color: rgba(250,204,21,0.4);
+          box-shadow: 0 0 24px rgba(250,204,21,0.08);
+        }
+        .winner-glow {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(135deg, rgba(250,204,21,0.05), transparent);
+          pointer-events: none;
+        }
+        .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+        .card-index {
+          width: 28px; height: 28px; border-radius: 8px;
+          display: flex; align-items: center; justify-content: center;
+          font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 800;
+          color: white; flex-shrink: 0;
+        }
+        .name-input {
+          flex: 1;
+          background: transparent;
+          border: none;
+          border-bottom: 1px solid var(--border);
+          color: var(--text);
+          font-family: 'Syne', sans-serif;
+          font-size: 15px;
+          font-weight: 600;
+          padding: 4px 0;
+          outline: none;
+          transition: border-color 0.2s;
+        }
+        .name-input:focus { border-color: var(--card-accent, #8b5cf6); }
+        .name-input::placeholder { color: var(--sub); font-weight: 400; }
+        .remove-btn {
+          width: 28px; height: 28px; border-radius: 8px;
+          background: rgba(239,68,68,0.15);
+          border: none; cursor: pointer;
+          color: #f87171; font-size: 12px;
+          display: flex; align-items: center; justify-content: center;
+          transition: background 0.2s;
+          flex-shrink: 0;
+        }
+        .remove-btn:hover { background: rgba(239,68,68,0.3); }
+
+        .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+        .badge {
+          font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 99px;
+          color: white; letter-spacing: 0.02em;
+        }
+
+        .preset-row { margin-bottom: 12px; }
+        .preset-select {
+          width: 100%;
+          background: var(--input-bg);
+          border: 1px solid var(--input-border);
+          color: var(--text);
+          padding: 8px 12px;
+          border-radius: 10px;
+          font-size: 13px;
+          font-family: inherit;
+          outline: none;
+          cursor: pointer;
+        }
+
+        .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+        .input-group { display: flex; flex-direction: column; gap: 4px; }
+        .input-group.span-2 { grid-column: span 2; }
+        .input-group label { font-size: 11px; color: var(--sub); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+        .input-group input, .input-group select {
+          background: var(--input-bg);
+          border: 1px solid var(--input-border);
+          color: var(--text);
+          padding: 9px 11px;
+          border-radius: 10px;
+          font-size: 14px;
+          font-family: inherit;
+          outline: none;
+          transition: border-color 0.2s;
+          width: 100%;
+        }
+        .input-group input:focus, .input-group select:focus {
+          border-color: var(--card-accent, #8b5cf6);
+        }
+        .input-group input[type=number] { -moz-appearance: textfield; }
+        .input-group input[type=number]::-webkit-outer-spin-button,
+        .input-group input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+        .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .result-item {
+          background: var(--input-bg);
+          border-radius: 12px;
+          padding: 10px 12px;
+        }
+        .result-item.span-2 { grid-column: span 2; }
+        .result-label { font-size: 10px; color: var(--sub); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; font-weight: 500; }
+        .result-value { font-size: 16px; font-weight: 700; font-family: 'Syne', sans-serif; color: var(--text); }
+        .result-main { color: var(--card-accent, #8b5cf6); }
+        .result-good { color: #34d399; }
+        .result-neutral { color: var(--sub); font-size: 13px; }
+        .result-savings { font-size: 18px; }
+        .math-note { font-size: 11px; color: var(--sub); line-height: 1.5; padding-top: 4px; }
+
+        .no-result {
+          text-align: center;
+          padding: 16px;
+          color: var(--sub);
+          font-size: 13px;
+          background: var(--input-bg);
+          border-radius: 12px;
+        }
+
+        .add-btn {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          width: 100%;
+          padding: 14px;
+          background: transparent;
+          border: 2px dashed var(--border);
+          border-radius: 16px;
+          color: var(--sub);
+          font-family: 'Syne', sans-serif;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: border-color 0.2s, color 0.2s;
+        }
+        .add-btn:hover { border-color: #8b5cf6; color: #8b5cf6; }
+
+        .footer {
+          text-align: center;
+          padding: 20px 16px 32px;
+          font-size: 12px;
+          color: var(--sub);
+        }
+
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+      `}</style>
+
+      <div className="header">
+        <div className="header-left">
+          <div className="app-title">DealScan</div>
+          <div className="app-sub">Supermarket deal calculator</div>
+        </div>
+        <div className="header-controls">
+          <select
+            className="currency-select"
+            value={currency.code}
+            onChange={e => setCurrency(CURRENCIES.find(c => c.code === e.target.value))}
+          >
+            {CURRENCIES.map(c => (
+              <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
+            ))}
+          </select>
+          <button className="dark-toggle" onClick={() => setDark(d => !d)}>
+            {dark ? "☀️" : "🌙"}
+          </button>
+        </div>
+      </div>
+
+      <div className="main">
+        <SmartRecommendation deals={deals} results={results} currency={currency} />
+        <ComparisonBar deals={deals} results={results} currency={currency} />
+
+        {deals.map((deal, i) => (
+          <DealCard
+            key={deal.id}
+            deal={deal}
+            index={i}
+            result={results[i]}
+            badges={allBadges[i]}
+            currency={currency}
+            onUpdate={fields => updateDeal(deal.id, fields)}
+            onRemove={() => removeDeal(deal.id)}
+            canRemove={deals.length > 1}
+          />
+        ))}
+
+        <button className="add-btn" onClick={addDeal}>
+          <span style={{ fontSize: 20 }}>+</span> Add Another Deal
+        </button>
+
+        <div className="footer">
+          DealScan · Compare smarter, save more · All calculations are local & instant
+        </div>
+      </div>
+    </div>
+  );
+}
